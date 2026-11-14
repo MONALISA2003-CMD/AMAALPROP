@@ -1,7 +1,6 @@
+
 name: AMAALPROP - Automatically extract any ZIP (flat, no duplicates)
 
-# Runs on every push to main; discovers *all committed* ZIPs, at ANY path/name.
-# No workflow_dispatch, no fixed incoming/ folder, no manual ZIP selection.
 on:
   push:
     branches:
@@ -19,6 +18,7 @@ jobs:
     if: github.repository == 'MONALISA2003-CMD/AMAALPROP'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
       - name: Check out AMAALPROP repository
         uses: actions/checkout@v4
@@ -31,20 +31,151 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Automatically find, flatten, deduplicate and remove every committed ZIP
-        run: python3 scripts/import_release_zip.py --auto
-
-      - name: Commit cleaned repository root automatically
+      - name: Bootstrap importer when missing
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          if git diff --cached --quiet; then
-            echo 'No ZIPs or repository changes found.'
+          mkdir -p scripts
+
+          if [ -f scripts/import_release_zip.py ]; then
+            echo "Importer already installed."
             exit 0
           fi
-          git commit -m 'chore(amaalprop): auto-extract ZIPs into canonical repository root'
-          # The action does not touch any other repository or branch.
+
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, is_zipfile
+          import subprocess
+          import sys
+
+          repo = Path.cwd()
+          archives = []
+
+          result = subprocess.run(
+              ["git", "ls-files", "-z"],
+              check=True,
+              stdout=subprocess.PIPE,
+          )
+
+          for raw in result.stdout.split(b"\0"):
+              if not raw:
+                  continue
+              rel = raw.decode("utf-8")
+              if rel.lower().endswith(".zip"):
+                  archives.append(repo / rel)
+
+          for archive in sorted(archives):
+              if not is_zipfile(archive):
+                  continue
+
+              with ZipFile(archive) as z:
+                  candidates = []
+                  for info in z.infolist():
+                      if info.is_dir():
+                          continue
+                      name = info.filename.replace("\\", "/")
+                      if name.endswith(
+                          "scripts/import_release_zip.py"
+                      ):
+                          candidates.append(info)
+
+                  if not candidates:
+                      continue
+
+                  if len(candidates) != 1:
+                      raise SystemExit(
+                          "Multiple importer candidates found."
+                      )
+
+                  source = candidates[0]
+
+                  if (
+                      source.file_size > 1024 * 1024
+                      or source.flag_bits & 1
+                  ):
+                      raise SystemExit("Unsafe importer entry.")
+
+                  data = z.read(source)
+                  compile(
+                      data.decode("utf-8"),
+                      "import_release_zip.py",
+                      "exec",
+                  )
+
+                  target = repo / "scripts/import_release_zip.py"
+                  target.write_bytes(data)
+
+                  print(f"Bootstrapped importer from {archive.name}")
+                  sys.exit(0)
+
+          raise SystemExit(
+              "Importer missing. Add scripts/import_release_zip.py "
+              "or upload the AMAALPROP source ZIP containing it."
+          )
+          PY
+
+      - name: Detect and extract all ZIP archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/import_release_zip.py --auto
+
+      - name: Verify flat repository structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path.cwd()
+
+          if (root / "AMAALPROP").is_dir():
+              raise SystemExit(
+                  "Nested AMAALPROP folder detected."
+              )
+
+          seen = set()
+
+          for path in root.rglob("*"):
+              if not path.is_file():
+                  continue
+
+              relative = path.relative_to(root)
+
+              if ".git" in relative.parts:
+                  continue
+
+              normalized = str(relative).casefold()
+
+              if normalized in seen:
+                  raise SystemExit(
+                      f"Duplicate path detected: {relative}"
+                  )
+
+              seen.add(normalized)
+
+          print("Repository structure validated.")
+          PY
+
+      - name: Commit extracted files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m \
+            "chore(amaalprop): automatically extract ZIP files"
+
           git push origin HEAD:main
+          
