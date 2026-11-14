@@ -1,0 +1,50 @@
+name: AMAALPROP - Automatically extract any ZIP (flat, no duplicates)
+
+# Runs on every push to main; discovers *all committed* ZIPs, at ANY path/name.
+# No workflow_dispatch, no fixed incoming/ folder, no manual ZIP selection.
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: amaalprop-automatic-zip-import
+  cancel-in-progress: false
+
+jobs:
+  auto-extract:
+    if: github.repository == 'MONALISA2003-CMD/AMAALPROP'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out AMAALPROP repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Automatically find, flatten, deduplicate and remove every committed ZIP
+        run: python3 scripts/import_release_zip.py --auto
+
+      - name: Commit cleaned repository root automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No ZIPs or repository changes found.'
+            exit 0
+          fi
+          git commit -m 'chore(amaalprop): auto-extract ZIPs into canonical repository root'
+          # The action does not touch any other repository or branch.
+          git push origin HEAD:main
